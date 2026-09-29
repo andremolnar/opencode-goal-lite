@@ -42,6 +42,8 @@ export interface GoalState {
   removedTasks: Array<{ id: string; reason: string; removedAt: number }>
   /** Pointers to the active project's guidance, not copied rules or validated policy. */
   policy?: { adrs: string[]; review: string[] }
+  /** Captured from a completed reviewer tool call, never from goal.update input. */
+  review?: { reviewer: string; callID: string; verdict: "pass" | "blocked"; blockers: Array<{ id: string; summary: string }>; at: number }
   completion?: { actor: "agent" | "user"; summary: string; at: number }
 }
 
@@ -113,27 +115,35 @@ export function createGoal(input: {
 }
 
 /** Records coverage; never calls the recorded command or certifies the truth of a summary. */
-export function assess(goal: GoalState): {
+export function assess(goal: GoalState, requiredReviewer?: string): {
   readyForCompletion: boolean
   missingCriteria: string[]
   openRequiredTasks: string[]
   unreviewedConstraints: string[]
+  reviewGate?: { reviewer: string; observed: boolean; verdict: "pass" | "blocked" | "missing"; blockers: Array<{ id: string; summary: string }> }
 } {
   const missingCriteria = goal.criteria.filter((item) => !item.evidence).map((item) => item.id)
   const openRequiredTasks = goal.tasks.filter((item) => item.required && item.status !== "done").map((item) => item.id)
   const unreviewedConstraints = goal.constraints.filter((item) => !item.review).map((item) => item.id)
+  const reviewGate = requiredReviewer ? {
+    reviewer: requiredReviewer,
+    observed: goal.review?.reviewer === requiredReviewer,
+    verdict: goal.review?.reviewer === requiredReviewer ? goal.review.verdict : "missing" as const,
+    blockers: goal.review?.reviewer === requiredReviewer ? goal.review.blockers : [],
+  } : undefined
   return {
-    readyForCompletion: goal.status === "active" && missingCriteria.length === 0 && openRequiredTasks.length === 0 && unreviewedConstraints.length === 0,
+    readyForCompletion: goal.status === "active" && missingCriteria.length === 0 && openRequiredTasks.length === 0 && unreviewedConstraints.length === 0 && (!reviewGate || (reviewGate.verdict === "pass" && reviewGate.blockers.length === 0)),
     missingCriteria,
     openRequiredTasks,
     unreviewedConstraints,
+    ...(reviewGate ? { reviewGate } : {}),
   }
 }
 
 /** A transparent attestation, not an independent semantic proof or approval request. */
-export function completeGoal(goal: GoalState, expectedRevision: number, input: { actor: "agent" | "user"; summary: string }, now: number): GoalState {
+export function completeGoal(goal: GoalState, expectedRevision: number, input: { actor: "agent" | "user"; summary: string }, now: number, requiredReviewer?: string): GoalState {
   if (goal.revision !== expectedRevision) throw new Error("Goal changed; refresh before completing")
-  if (!assess(goal).readyForCompletion) throw new Error("Goal is not ready for completion")
+  if (!assess(goal, requiredReviewer).readyForCompletion) throw new Error("Goal is not ready for completion; check review gate and recorded work")
   if (input.actor !== "agent" && input.actor !== "user") throw new Error("Invalid completion actor")
   return {
     ...goal,
@@ -141,6 +151,20 @@ export function completeGoal(goal: GoalState, expectedRevision: number, input: {
     revision: goal.revision + 1,
     updatedAt: timestamp(now),
     completion: { actor: input.actor, summary: nonempty(input.summary, "completion summary"), at: now },
+  }
+}
+
+/** Only the host-observed reviewer hook calls this; never expose it through goal.update. */
+export function recordReview(goal: GoalState, reviewer: string, callID: string, verdict: "pass" | "blocked", findings: Array<{ id: string; summary: string; severity: string; status: "open" | "resolved" }>, now: number): GoalState {
+  if (goal.status !== "active") return goal
+  const outstanding = new Map((goal.review?.blockers ?? []).map((item) => [item.id, item]))
+  for (const finding of findings) {
+    if (finding.status === "resolved") outstanding.delete(finding.id)
+    else if (["P0", "P1", "high"].includes(finding.severity)) outstanding.set(finding.id, { id: finding.id, summary: finding.summary })
+  }
+  return {
+    ...goal, revision: goal.revision + 1, updatedAt: timestamp(now),
+    review: { reviewer, callID, verdict: verdict === "pass" && outstanding.size === 0 ? "pass" : "blocked", blockers: [...outstanding.values()], at: now },
   }
 }
 
@@ -155,9 +179,12 @@ export function changeGoal(goal: GoalState, expectedRevision: number, change: Ch
     tasks: goal.tasks.map((item) => ({ ...item })),
     removedTasks: goal.removedTasks.map((item) => ({ ...item })),
     policy: goal.policy && { adrs: [...goal.policy.adrs], review: [...goal.policy.review] },
+    review: goal.review && { ...goal.review, blockers: goal.review.blockers.map((item) => ({ ...item })) },
     revision: goal.revision + 1,
     updatedAt: timestamp(now),
   }
+  // Keep known blockers across scope changes; any work update requires a fresh review.
+  if (next.review && !["policy.set", "goal.pause", "goal.resume"].includes(change.type)) next.review.verdict = "blocked"
   const idInUse = (id: string) => [...next.criteria, ...next.constraints, ...next.tasks, ...next.removedTasks].some((item) => item.id === id)
   switch (change.type) {
     case "objective.set":
