@@ -68,11 +68,9 @@ The reviewer must end with one line: `GOAL_LITE_REVIEW_JSON: {"verdict":"pass","
 
 When a reviewer is configured, `finish` also requires `prHandoff: "open" | "pending" | "not-applicable"`. The `pending` value records PR creation in the completion summary and next steps without blocking completion. The reviewer's findings remain its judgment; the plugin does not verify later code changes or whether a PR exists. Check the final diff, and report an unopened PR as a handoff step when the project requires one.
 
-## Origin and project precedence
+## Project precedence
 
-This repository was extracted from the Goal Lite implementation shipped to [CreativeXHub PR #200](https://github.com/snklinc/creativexhub/pull/200) at commit `69ca65c13de86f4d9f16fb656f6ed6b90b0bab50`. CreativeXHub keeps its checked-in copy and its existing plugin storage ID. This standalone copy uses the neutral `goal-lite` ID and can evolve independently.
-
-OpenCode loads the linked JavaScript file as a global plugin and discovers the linked global skill and command. If a project has `.opencode/plugins/goal-lite.js` or `.ts`, the global plugin does not register tools or a context hook there. A project skill or command with the same ID also takes precedence over its global counterpart. This keeps the global installation from masking CreativeXHub goals stored under its legacy `creativexhub.goal-lite` plugin ID. Do not replace or delete that project's local loader to migrate existing goals.
+OpenCode loads the linked JavaScript file as a global plugin. It also discovers the linked global skill and command. If a project has `.opencode/plugins/goal-lite.js` or `.ts`, the global plugin does not register tools or a context hook there. A project skill or command with the same ID also takes precedence over its global counterpart. Do not remove a project's local loader to activate the global plugin; existing goals may use a different storage ID.
 
 ## Develop and limits
 
