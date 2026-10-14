@@ -1,0 +1,6 @@
+{
+  "README.md": "prettier --write",
+  "CHANGELOG.md": "prettier --write",
+  "package.json": "prettier --write",
+  ".github/workflows/*.yml": "prettier --write"
+}
