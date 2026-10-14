@@ -1,4 +1,4 @@
-import type { Change, GoalState, TaskStatus } from "./core.js"
+import type { Change, Completion, GoalState, ReviewReceipt, TaskStatus } from "./core.js"
 
 const idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/
 const textLimit = 2000
@@ -101,6 +101,26 @@ export function decodeChange(value: unknown, now: number): Change {
   }
 }
 
+export function decodeReopen(value: unknown): string {
+  return string(object(value, "Reopen request").reason, "Reopening reason", evidenceLimit)
+}
+
+function decodeCompletion(value: unknown): Completion {
+  const completion = object(value, "Completion")
+  if (!["user", "agent"].includes(completion.actor as string)) throw new Error("Invalid completion actor")
+  return { actor: completion.actor as Completion["actor"], summary: string(completion.summary, "Completion summary", evidenceLimit), at: time(completion.at) }
+}
+
+function decodeReview(value: unknown): ReviewReceipt {
+  const review = object(value, "Review")
+  const blockers = items(review.blockers, "Review blockers", 100).map((item) => {
+    if (typeof item.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,119}$/.test(item.id)) throw new Error("Invalid review blocker ID")
+    return { id: item.id, summary: string(item.summary, "Review blocker", 500) }
+  })
+  if (typeof review.reviewer !== "string" || !idPattern.test(review.reviewer) || typeof review.callID !== "string" || !review.callID.trim() || review.callID.length > 256 || !["pass", "blocked"].includes(review.verdict as string) || (review.verdict === "pass" && blockers.length)) throw new Error("Invalid stored review")
+  return { reviewer: review.reviewer, callID: review.callID, verdict: review.verdict as ReviewReceipt["verdict"], blockers, at: time(review.at) }
+}
+
 /** Reject corrupt, future-version, or overlarge persisted data instead of silently resetting a goal. */
 export function decodeState(value: unknown, sessionID: string): GoalState {
   const state = object(value, "Stored goal")
@@ -128,21 +148,20 @@ export function decodeState(value: unknown, sessionID: string): GoalState {
   const all = [...criteria, ...constraints, ...tasks, ...removedTasks].map((item) => item.id)
   if (new Set(all).size !== all.length) throw new Error("Duplicate stored ID")
   if (!["active", "paused", "complete"].includes(state.status as string)) throw new Error("Invalid goal status")
-  const completion = state.completion === undefined ? undefined : object(state.completion, "Completion")
-  const review = state.review === undefined ? undefined : object(state.review, "Review")
-  const blockers = review ? items(review.blockers, "Review blockers", 100).map((item) => {
-    if (typeof item.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,119}$/.test(item.id)) throw new Error("Invalid review blocker ID")
-    return { id: item.id, summary: string(item.summary, "Review blocker", 500) }
-  }) : []
-  if (review && (typeof review.reviewer !== "string" || !idPattern.test(review.reviewer) || typeof review.callID !== "string" || !review.callID.trim() || review.callID.length > 256 || !["pass", "blocked"].includes(review.verdict as string) || (review.verdict === "pass" && blockers.length))) throw new Error("Invalid stored review")
-  if (completion && !["user", "agent"].includes(completion.actor as string)) throw new Error("Invalid completion actor")
+  const completion = state.completion === undefined ? undefined : decodeCompletion(state.completion)
+  const review = state.review === undefined ? undefined : decodeReview(state.review)
+  const completionHistory = state.completionHistory === undefined ? undefined : items(state.completionHistory, "Completion history", 50).map((entry) => ({
+    completion: decodeCompletion(entry.completion), reason: string(entry.reason, "Reopening reason", evidenceLimit), reopenedAt: time(entry.reopenedAt),
+    ...(entry.review === undefined ? {} : { review: decodeReview(entry.review) }),
+  }))
   if ((state.status === "complete") !== Boolean(completion)) throw new Error("Completion/status mismatch")
   return {
     schemaVersion: 1, id: id(state.id), sessionID, objective: initial.objective,
     status: state.status as GoalState["status"], revision: time(state.revision), updatedAt: time(state.updatedAt),
     criteria, constraints, tasks, removedTasks,
     ...(policy ? { policy: { adrs: references(policy.adrs, "ADR references"), review: references(policy.review, "Review references") } } : {}),
-    ...(review ? { review: { reviewer: review.reviewer as string, callID: review.callID as string, verdict: review.verdict as "pass" | "blocked", blockers, at: time(review.at) } } : {}),
-    ...(completion ? { completion: { actor: completion.actor as "agent" | "user", summary: string(completion.summary, "Completion summary", evidenceLimit), at: time(completion.at) } } : {}),
+    ...(review ? { review } : {}),
+    ...(completion ? { completion } : {}),
+    ...(completionHistory ? { completionHistory } : {}),
   }
 }

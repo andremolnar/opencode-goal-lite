@@ -2,8 +2,8 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { GoalState } from "./core.js"
-import { assess, changeGoal, completeGoal, createGoal, recordReview } from "./core.js"
-import { decodeChange, decodeStart } from "./codec.js"
+import { assess, changeGoal, completeGoal, createGoal, recordReview, reopenGoal } from "./core.js"
+import { decodeChange, decodeReopen, decodeStart } from "./codec.js"
 import { GoalStore } from "./store.js"
 import { parseReviewReport } from "./review.js"
 
@@ -75,6 +75,21 @@ export function createGoalLitePlugin(options: { requiredReviewer?: string } = {}
           const goal = await store.update(context.sessionID, (current) => {
             if (!current) throw new Error("No goal for this session")
             return changeGoal(current, args.expectedRevision, decodeChange(args.change, Date.now()), Date.now())
+          })
+          return { content: JSON.stringify({ goal, assessment: assess(goal, reviewer) }) }
+        },
+      })
+
+      editor.add({
+        name: "reopen", description: "Explicitly reopen this session's completed goal with a reason and expected revision. Retains prior completion, clears evidence and constraint reviews, and requires a fresh configured reviewer pass. Does not start new work automatically.",
+        input: object({ expectedRevision: { type: "integer", minimum: 0 }, reason: { type: "string", minLength: 1, maxLength: 1000 } }, ["expectedRevision", "reason"]),
+        options: { namespace: "goal", codemode: true },
+        async execute(input, context) {
+          const args = input as { expectedRevision: number; reason: string }
+          const reason = decodeReopen(input)
+          const goal = await store.update(context.sessionID, (current) => {
+            if (!current) throw new Error("No goal for this session")
+            return reopenGoal(current, args.expectedRevision, reason, Date.now())
           })
           return { content: JSON.stringify({ goal, assessment: assess(goal, reviewer) }) }
         },

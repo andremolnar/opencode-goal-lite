@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { assess, changeGoal, completeGoal, createGoal } from "../src/core.ts"
+import { assess, changeGoal, completeGoal, createGoal, reopenGoal, recordReview } from "../src/core.ts"
 
 function fresh() {
   return createGoal({
@@ -83,6 +83,41 @@ test("paused work is not ready and requires explicit resume", () => {
   const active = change(paused, { type: "goal.resume" })
   assert.equal(active.status, "active")
   assert.throws(() => change(active, { type: "goal.resume" }), /not paused/)
+})
+
+test("reopening a completed goal preserves its attestation but requires new evidence and a fresh reviewer pass", () => {
+  let state = change(fresh(), { type: "task.add", id: "build", text: "Deliver plugin" })
+  state = change(state, { type: "task.status", id: "build", status: "done" })
+  for (const criterion of state.criteria) state = change(state, { type: "criterion.record", id: criterion.id, evidence: evidence("First pass") })
+  state = change(state, { type: "constraint.review", id: "guard", note: "Checked the first pass" })
+  state = recordReview(state, "quality-reviewer", "call-1", "pass", [], 250)
+  const completed = completeGoal(state, state.revision, { actor: "agent", summary: "First attempt" }, 300, "quality-reviewer")
+  assert.throws(() => reopenGoal(completed, completed.revision - 1, "Missing behavior", 301), /Goal changed/)
+  assert.throws(() => reopenGoal(completed, completed.revision, "  ", 301), /reopening reason/)
+  const reopened = reopenGoal(completed, completed.revision, "User found a missing path", 301)
+  assert.equal(reopened.status, "active")
+  assert.equal(reopened.completion, undefined)
+  assert.equal(reopened.revision, completed.revision + 1)
+  assert.deepEqual(reopened.completionHistory, [{ completion: completed.completion, reason: "User found a missing path", reopenedAt: 301, review: completed.review }])
+  assert.deepEqual(reopened.tasks, completed.tasks)
+  assert.deepEqual(assess(reopened, "quality-reviewer").missingCriteria, ["c1", "c2"])
+  assert.deepEqual(assess(reopened).unreviewedConstraints, ["guard"])
+  assert.equal(assess(reopened, "quality-reviewer").reviewGate.verdict, "blocked")
+  assert.throws(() => completeGoal(reopened, reopened.revision, { actor: "agent", summary: "Premature" }, 302, "quality-reviewer"), /not ready/)
+  assert.equal(completed.review.verdict, "pass")
+  assert.ok(completed.criteria[0].evidence)
+  assert.throws(() => reopenGoal(reopened, reopened.revision, "Again", 302), /Only a completed goal/)
+  assert.throws(() => change(reopened, { type: "goal.resume" }), /not paused/)
+  state = reopened
+  for (const criterion of reopened.criteria) state = change(state, { type: "criterion.record", id: criterion.id, evidence: evidence("Rechecked") })
+  state = change(state, { type: "constraint.review", id: "guard", note: "Rechecked" })
+  assert.equal(assess(state, "quality-reviewer").readyForCompletion, false)
+  state = recordReview(state, "quality-reviewer", "call-2", "pass", [], 400)
+  const second = completeGoal(state, state.revision, { actor: "agent", summary: "Missing path fixed" }, 401, "quality-reviewer")
+  assert.equal(second.completionHistory.length, 1)
+  assert.equal(second.completion.summary, "Missing path fixed")
+  assert.equal(second.completionHistory[0].completion.summary, "First attempt")
+  assert.throws(() => reopenGoal({ ...second, completionHistory: Array(50).fill(second.completionHistory[0]) }, second.revision, "Another gap", 402), /history limit/)
 })
 
 test("invalid contracts and task order are rejected", () => {

@@ -28,6 +28,9 @@ export interface Task {
   reason?: string
 }
 
+export type ReviewReceipt = { reviewer: string; callID: string; verdict: "pass" | "blocked"; blockers: Array<{ id: string; summary: string }>; at: number }
+export type Completion = { actor: "agent" | "user"; summary: string; at: number }
+
 export interface GoalState {
   schemaVersion: 1
   id: string
@@ -43,8 +46,10 @@ export interface GoalState {
   /** Pointers to the active project's guidance, not copied rules or validated policy. */
   policy?: { adrs: string[]; review: string[] }
   /** Captured from a completed reviewer tool call, never from goal.update input. */
-  review?: { reviewer: string; callID: string; verdict: "pass" | "blocked"; blockers: Array<{ id: string; summary: string }>; at: number }
-  completion?: { actor: "agent" | "user"; summary: string; at: number }
+  review?: ReviewReceipt
+  completion?: Completion
+  /** Previous completion attestations retained when this session's goal is explicitly reopened. */
+  completionHistory?: Array<{ completion: Completion; reason: string; reopenedAt: number; review?: ReviewReceipt }>
 }
 
 export type Change =
@@ -151,6 +156,26 @@ export function completeGoal(goal: GoalState, expectedRevision: number, input: {
     revision: goal.revision + 1,
     updatedAt: timestamp(now),
     completion: { actor: input.actor, summary: nonempty(input.summary, "completion summary"), at: now },
+  }
+}
+
+/** Reopen only a completed goal. Keep its prior attestation while requiring fresh evidence and review. */
+export function reopenGoal(goal: GoalState, expectedRevision: number, reason: string, now: number): GoalState {
+  if (goal.revision !== expectedRevision) throw new Error("Goal changed; refresh before reopening")
+  if (goal.status !== "complete" || !goal.completion) throw new Error("Only a completed goal can be reopened")
+  if ((goal.completionHistory?.length ?? 0) >= 50) throw new Error("Completion history limit reached")
+  const at = timestamp(now)
+  const prior = {
+    completion: { ...goal.completion }, reason: nonempty(reason, "reopening reason"), reopenedAt: at,
+    ...(goal.review ? { review: { ...goal.review, blockers: goal.review.blockers.map((item) => ({ ...item })) } } : {}),
+  }
+  return {
+    ...goal, status: "active", revision: goal.revision + 1, updatedAt: at,
+    criteria: goal.criteria.map(({ evidence: _evidence, ...item }) => ({ ...item })),
+    constraints: goal.constraints.map(({ review: _review, ...item }) => ({ ...item })),
+    review: goal.review && { ...goal.review, verdict: "blocked", blockers: goal.review.blockers.map((item) => ({ ...item })) },
+    completion: undefined,
+    completionHistory: [...(goal.completionHistory ?? []), prior],
   }
 }
 

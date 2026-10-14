@@ -129,11 +129,59 @@ test("a reviewer pass before work or across an in-flight goal update cannot comp
   assert.equal((await runtime.call("status", {})).assessment.reviewGate.verdict, "blocked")
 })
 
+test("reopen is revision-checked, survives restart, and cannot reuse a completed review", async () => {
+  const saved = new Map()
+  const configured = createGoalLitePlugin({ requiredReviewer: "quality-reviewer" })
+  const first = host(saved, configured)
+  await first.start()
+  let state = await first.call("start", { objective: "Ship a feature", criteria: [{ id: "works", text: "It works" }], constraints: [{ id: "safe", text: "Stay local" }], tasks: [{ id: "build", text: "Build it" }] })
+  const update = async (change) => { state = await first.call("update", { expectedRevision: state.goal.revision, change }); return state }
+  await update({ type: "task.status", id: "build", status: "done" })
+  await update({ type: "criterion.record", id: "works", evidence: { kind: "file", reference: "old", summary: "Looked good" } })
+  await update({ type: "constraint.review", id: "safe", note: "Local only" })
+  await first.reviewer('GOAL_LITE_REVIEW_JSON: {"verdict":"pass","findings":[]}')
+  state = await first.call("status", {})
+  const finished = await first.call("finish", { expectedRevision: state.goal.revision, summary: "First attempt", prHandoff: "open" })
+  const revision = finished.goal.revision
+  await assert.rejects(first.call("update", { expectedRevision: revision, change: { type: "task.add", id: "fix", text: "Fix it" } }), /cannot be changed/)
+  await assert.rejects(first.call("reopen", { expectedRevision: revision, reason: "  " }), /Reopening reason/)
+  await assert.rejects(first.call("reopen", { expectedRevision: revision - 1, reason: "Missed scenario" }), /Goal changed/)
+  const reopened = await first.call("reopen", { expectedRevision: revision, reason: "User found a missing scenario" })
+  assert.equal(reopened.goal.status, "active")
+  assert.equal(reopened.goal.tasks[0].status, "done")
+  assert.equal(reopened.goal.completionHistory[0].completion.summary, "First attempt")
+  assert.equal(reopened.goal.completionHistory[0].review.verdict, "pass")
+  assert.equal(reopened.assessment.reviewGate.verdict, "blocked")
+  assert.deepEqual(reopened.assessment.missingCriteria, ["works"])
+  assert.deepEqual(reopened.assessment.unreviewedConstraints, ["safe"])
+  await assert.rejects(first.call("finish", { expectedRevision: reopened.goal.revision, summary: "Too soon", prHandoff: "open" }), /not ready/)
+  assert.equal((await first.context()).length, 1)
+
+  const second = host(saved, configured)
+  await second.start()
+  state = await second.call("status", {})
+  assert.deepEqual(state.goal.completionHistory, reopened.goal.completionHistory)
+  const revise = async (change) => { state = await second.call("update", { expectedRevision: state.goal.revision, change }); return state }
+  await revise({ type: "task.add", id: "fix", text: "Cover missing scenario" })
+  await revise({ type: "task.status", id: "fix", status: "done" })
+  await revise({ type: "criterion.record", id: "works", evidence: { kind: "command", reference: "npm test", summary: "Rechecked" } })
+  await revise({ type: "constraint.review", id: "safe", note: "Confirmed local" })
+  await assert.rejects(second.call("finish", { expectedRevision: state.goal.revision, summary: "Not reviewed", prHandoff: "open" }), /not ready/)
+  await second.reviewer('GOAL_LITE_REVIEW_JSON: {"verdict":"pass","findings":[]}')
+  state = await second.call("status", {})
+  const finishedAgain = await second.call("finish", { expectedRevision: state.goal.revision, summary: "User scenario covered", prHandoff: "open" })
+  assert.equal(finishedAgain.goal.completionHistory.length, 1)
+  assert.equal(finishedAgain.goal.completion.summary, "User scenario covered")
+  const reopenedAgain = await second.call("reopen", { expectedRevision: finishedAgain.goal.revision, reason: "One more issue" })
+  assert.equal(reopenedAgain.goal.completionHistory.length, 2)
+  assert.equal(reopenedAgain.goal.completionHistory[1].completion.summary, "User scenario covered")
+})
+
 test("V2 adapter persists, serializes concurrent writes, rehydrates after simulated compaction and host restart", async () => {
   const state = new Map()
   const first = host(state)
   const cleanup = await first.start()
-  assert.deepEqual([...first.tools.keys()], ["start", "status", "update", "finish"])
+  assert.deepEqual([...first.tools.keys()], ["start", "status", "update", "reopen", "finish"])
   const created = await first.call("start", {
     objective: "Ship a well-tested tiny goal plugin", criteria: [{ id: "works", text: "The saved goal survives compaction" }],
     constraints: [{ id: "no-rerun", text: "Never automatically rerun tests" }],
@@ -224,6 +272,26 @@ test("codec limits input, rejects unknown operations and assigns its own evidenc
   assert.throws(() => decodeChange({ type: "policy.set", adrs: ["docs/one.md", "docs/one.md"], review: [] }, 99), /unique/)
   assert.throws(() => decodeChange({ type: "policy.set", adrs: ["C:/other/secret"], review: [] }, 99), /relative project paths/)
   assert.throws(() => decodeChange({ type: "policy.set", adrs: [], review: Array(11).fill("guide.md") }, 99), /at most 10/)
+  assert.throws(() => decodeChange({ type: "goal.reopen", reason: "bypass" }, 99), /Unsupported/)
+})
+
+test("stored completion history is validated without breaking legacy completed goals", async () => {
+  const memory = new Map()
+  const runtime = host(memory)
+  await runtime.start()
+  let state = await runtime.call("start", { objective: "Small goal", criteria: [{ id: "done", text: "Done" }], constraints: [], tasks: [] })
+  state = await runtime.call("update", { expectedRevision: state.goal.revision, change: { type: "criterion.record", id: "done", evidence: { kind: "manual", reference: "check", summary: "done" } } })
+  state = await runtime.call("finish", { expectedRevision: state.goal.revision, summary: "Completed" })
+  assert.equal(state.goal.completionHistory, undefined) // pre-reopen schema remains compatible
+  const key = [...memory.keys()][0]
+  const reopened = await runtime.call("reopen", { expectedRevision: state.goal.revision, reason: "Missed detail" })
+  assert.equal(reopened.goal.completionHistory.length, 1)
+  const corrupt = structuredClone(memory.get(key))
+  corrupt.completionHistory[0].reason = ""
+  assert.throws(() => decodeState(corrupt, "ses-v2"), /Reopening reason/)
+  corrupt.completionHistory[0].reason = "Fixed"
+  corrupt.completionHistory[0].completion.at = -1
+  assert.throws(() => decodeState(corrupt, "ses-v2"), /Invalid timestamp/)
 })
 
 test("contrasting project references survive compaction and restart without embedding rules in the reminder", async () => {

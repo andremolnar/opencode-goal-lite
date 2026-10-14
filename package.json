@@ -1,6 +1,6 @@
 {
   "name": "goal-lite-opencode",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "exports": {
@@ -9,13 +9,18 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test --experimental-strip-types test/*.test.mjs"
+    "test": "npm run build && node --test --experimental-strip-types test/*.test.mjs",
+    "format:check": "prettier --check README.md CHANGELOG.md package.json .github/workflows/ci.yml",
+    "prepare": "husky"
   },
   "dependencies": {
     "@opencode/plugin": "2.0.18"
   },
   "devDependencies": {
     "@types/node": "24.0.3",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.0",
+    "prettier": "^3.9.10",
     "typescript": "5.8.3"
   }
 }
