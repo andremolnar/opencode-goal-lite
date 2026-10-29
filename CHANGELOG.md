@@ -2,6 +2,12 @@
 
 Goal Lite follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This changelog records changes relevant to people using the plugin or contributing to the repository.
 
+## [0.1.1] - 2026-10-29
+
+### Changed
+
+- Updated Goal Lite to use the OpenCode 2.2.0 plugin SDK and refreshed its locked dependencies. The goal workflow is unchanged.
+
 ## [0.1.0] - 2026-10-13
 
 ### Added
