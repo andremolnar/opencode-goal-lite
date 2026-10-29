@@ -1,6 +1,6 @@
 {
   "name": "goal-lite-opencode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "exports": {
@@ -14,7 +14,7 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "@opencode/plugin": "2.0.18"
+    "@opencode/plugin": "2.2.0"
   },
   "devDependencies": {
     "@types/node": "24.0.3",
